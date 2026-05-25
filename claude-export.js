@@ -144,6 +144,23 @@
   }
   const convId = convMatch[1]
 
+  // Try fetching the conversation from each org in turn; Claude returns 403/404
+  // when the conversation doesn't belong to that org, so we move on to the next.
+  function fetchConvFromOrgs(orgs, idx) {
+    if (idx >= orgs.length) {
+      throw new Error('Conversation not found in any of your organizations (tried ' + orgs.length + ')')
+    }
+    return fetch(
+      '/api/organizations/' + orgs[idx].uuid +
+      '/chat_conversations/' + convId +
+      '?tree=True&rendering_mode=messages'
+    ).then(function (r) {
+      if (r.status === 403 || r.status === 404) return fetchConvFromOrgs(orgs, idx + 1)
+      if (!r.ok) throw new Error('Could not fetch conversation (HTTP ' + r.status + ')')
+      return r.json()
+    })
+  }
+
   // Fetch the current user's organization list, then pull the conversation JSON.
   // Cookies are sent automatically because we are on the same origin.
   fetch('/api/organizations')
@@ -155,20 +172,13 @@
       if (!Array.isArray(orgs) || !orgs.length) {
         throw new Error('No organizations returned — are you logged in?')
       }
-      // For users with multiple orgs: find the one whose UUID is in the current URL,
-      // or fall back to the first (personal workspace is typically first).
-      const orgId = (
-        orgs.find(function (o) { return window.location.href.includes(o.uuid) }) || orgs[0]
-      ).uuid
-      return fetch(
-        '/api/organizations/' + orgId +
-        '/chat_conversations/' + convId +
-        '?tree=True&rendering_mode=messages'
-      )
-    })
-    .then(function (r) {
-      if (!r.ok) throw new Error('Could not fetch conversation (HTTP ' + r.status + ')')
-      return r.json()
+      // Prefer the org whose UUID appears in the current URL (e.g. team workspaces),
+      // then try the rest in order so multi-org accounts always find the right one.
+      const urlOrg = orgs.find(function (o) { return window.location.href.includes(o.uuid) })
+      const ordered = urlOrg
+        ? [urlOrg].concat(orgs.filter(function (o) { return o !== urlOrg }))
+        : orgs
+      return fetchConvFromOrgs(ordered, 0)
     })
     .then(function (data) {
       const md = buildMarkdown(data)
